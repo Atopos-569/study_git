@@ -1,0 +1,30 @@
+name: temp-wallpics-discovery-20260816
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch Wallpics pages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p discovery
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36'
+          curl -L --fail --retry 2 -A "$UA" 'https://wallpics.app/live-wallpaper/spongebob-and-patricks-bikini-bottom-animated-hd-wallpaper-39467' -o discovery/page.html
+          curl -L --fail --retry 2 -A "$UA" 'https://wallpics.app/live-wallpapers/cartoon-2274/cartoon-spongebob-square-pants' -o discovery/category.html
+          curl -L -A "$UA" 'https://wallpics.app/robots.txt' -o discovery/robots.txt || true
+          curl -L -A "$UA" 'https://wallpics.app/sitemap.xml' -o discovery/sitemap.xml || true
+          grep -Eoi 'https?:[^"'"'"'<> ]+\.(mp4|mov|webm|m3u8)[^"'"'"'<> ]*|<(video|source)[^>]*>' discovery/page.html | head -100 > discovery/media-matches.txt || true
+          grep -Eoi 'href=["'"'"'][^"'"'"']*/live-wallpaper/[^"'"'"'#?]+' discovery/category.html | head -200 > discovery/category-links.txt || true
+          wc -c discovery/*
+      - name: Upload discovery
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallpics-spongebob-discovery
+          path: discovery/
+          retention-days: 1
