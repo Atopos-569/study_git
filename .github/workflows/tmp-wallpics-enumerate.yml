@@ -13,9 +13,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p enum
-          cat > enum.py <<'PY'
-          import re, json, urllib.request, urllib.parse, time
+          mkdir -p enumeration
+          cat > crawl_pages.py <<'PY'
+          import re, json, urllib.request, time
           BASE='https://wallpics.app'
           CAT=BASE+'/live-wallpapers/cartoon-2274/cartoon-spongebob-square-pants'
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36'
@@ -35,18 +35,18 @@ jobs:
                       seen.add(u); urls.append(u); fresh+=1
               nxt=bool(re.search(r'<link[^>]+rel=["\']next["\'][^>]*>',html,re.I))
               print(f'page={page} links={len(links)} new={fresh} next={nxt}')
-              open(f'enum/page-{page:03d}.txt','w').write('\n'.join(BASE+x for x in links))
+              open(f'enumeration/page-{page:03d}.txt','w').write('\n'.join(BASE+x for x in links))
               if not nxt: break
               page+=1; time.sleep(.15)
-          open('enum/urls.txt','w').write('\n'.join(urls)+'\n')
-          json.dump({'count':len(urls),'pages':page,'urls':urls},open('enum/summary.json','w'),indent=2)
+          open('enumeration/urls.txt','w').write('\n'.join(urls)+'\n')
+          json.dump({'count':len(urls),'pages':page,'urls':urls},open('enumeration/summary.json','w'),indent=2)
           print('TOTAL',len(urls),'PAGES',page)
           PY
-          python3 enum.py
-          cat enum/summary.json | head -40
+          python3 crawl_pages.py
+          cat enumeration/summary.json | head -40
       - name: Upload enumeration
         uses: actions/upload-artifact@v4
         with:
           name: wallpics-spongebob-enumeration
-          path: enum/
+          path: enumeration/
           retention-days: 1
