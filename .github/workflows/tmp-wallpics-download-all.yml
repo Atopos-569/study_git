@@ -1,0 +1,187 @@
+name: temp-wallpics-download-all
+on:
+  push:
+    branches: [tmp-wallpics-spongebob-20260816]
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download every original SpongeBob live wallpaper
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/videos output/meta
+          cat > download_all.py <<'PY'
+          import os, re, json, csv, time, subprocess, urllib.request
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
+          BASE='https://wallpics.app'
+          CAT=BASE+'/live-wallpapers/cartoon-2274/cartoon-spongebob-square-pants'
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36'
+          OUT='output'
+
+          def fetch_text(url, attempts=4):
+              last=None
+              for n in range(attempts):
+                  try:
+                      req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'text/html,application/xhtml+xml,*/*;q=0.8'})
+                      with urllib.request.urlopen(req,timeout=45) as r:
+                          return r.read().decode('utf-8','ignore')
+                  except Exception as e:
+                      last=e; time.sleep(1.2*(n+1))
+              raise last
+
+          def decode_next_payload(html):
+              return (html.replace('\\u0026','&').replace('\\u003d','=').replace('\\u003f','?')
+                          .replace('\\u002f','/').replace('\\/','/').replace('\\"','"'))
+
+          # 1) Crawl every pagination page in the SpongeBob live category.
+          pages=[]; seen=set(); pageno=1
+          while pageno <= 100:
+              url=CAT if pageno==1 else CAT+f'?page={pageno}'
+              html=fetch_text(url)
+              links=re.findall(r'href=["\'](/live-wallpaper/[^"\'#?]+)',html,re.I)
+              fresh=0
+              for path in links:
+                  page=BASE+path.rstrip('/')
+                  if page not in seen:
+                      seen.add(page); pages.append(page); fresh+=1
+              has_next=bool(re.search(r'<link[^>]+rel=["\']next["\'][^>]*>',html,re.I))
+              print(f'CATEGORY page={pageno} links={len(links)} new={fresh} next={has_next}',flush=True)
+              if not has_next: break
+              pageno += 1
+              time.sleep(.15)
+
+          print(f'DISCOVERED {len(pages)} live wallpaper detail pages over {pageno} category pages',flush=True)
+          open(f'{OUT}/meta/detail-pages.txt','w',encoding='utf-8').write('\n'.join(pages)+'\n')
+
+          def probe(path):
+              info={'width':0,'height':0,'duration':0.0,'bitrate':0,'size':os.path.getsize(path)}
+              try:
+                  cp=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=width,height:format=duration,bit_rate,size','-of','json',path],capture_output=True,text=True,timeout=30)
+                  if cp.returncode==0:
+                      j=json.loads(cp.stdout); st=(j.get('streams') or [{}])[0]; fm=j.get('format') or {}
+                      info.update(width=int(st.get('width') or 0),height=int(st.get('height') or 0),duration=float(fm.get('duration') or 0),bitrate=int(fm.get('bit_rate') or 0),size=int(fm.get('size') or os.path.getsize(path)))
+              except Exception as e:
+                  info['probe_error']=repr(e)
+              return info
+
+          def download_binary(url, page_url, dest, attempts=4):
+              last=None
+              for n in range(attempts):
+                  try:
+                      req=urllib.request.Request(url,headers={'User-Agent':UA,'Referer':page_url,'Accept':'*/*'})
+                      with urllib.request.urlopen(req,timeout=60) as r, open(dest+'.part','wb') as f:
+                          while True:
+                              b=r.read(1024*1024)
+                              if not b: break
+                              f.write(b)
+                      if os.path.getsize(dest+'.part') < 1024:
+                          raise RuntimeError('downloaded file too small')
+                      os.replace(dest+'.part',dest)
+                      return
+                  except Exception as e:
+                      last=e
+                      try: os.remove(dest+'.part')
+                      except: pass
+                      time.sleep(1.5*(n+1))
+              raise last
+
+          def process(page_url):
+              slug=page_url.rstrip('/').split('/')[-1]
+              mid=re.search(r'-(\d+)$',slug)
+              wid=int(mid.group(1)) if mid else 0
+              try:
+                  html=fetch_text(page_url)
+                  txt=decode_next_payload(html)
+                  # Start at current wallpaperData so recommendations do not win.
+                  start=txt.find('wallpaperData')
+                  if start < 0: start=0
+                  cur=txt[start:]
+                  title_m=re.search(r'<title[^>]*>(.*?)</title>',html,re.I|re.S)
+                  title=re.sub(r'\s*\|\s*Wallpics\s*$','',re.sub('<[^>]+>',' ',title_m.group(1)).strip()) if title_m else slug
+                  # Highest-quality source: explicit original first, then primary video. Never lq/thumbnail_video.
+                  m=re.search(r'"video_original "\s*:\s*"([^"]+)',cur,re.I)
+                  source_kind='video_original'
+                  if not m:
+                      m=re.search(r'"video"\s*:\s*"([^"]+)',cur,re.I)
+                      source_kind='video'
+                  if not m:
+                      raise RuntimeError('original/primary video source not found')
+                  source=m.group(1).replace('&amp;','&')
+                  meta_w=re.search(r'"width"\s*:\s*(\d+)',cur)
+                  meta_h=re.search(r'"height"\s*:\s*(\d+)',cur)
+                  safe_slug=re.sub(r'[^A-Za-z0-9._-]+','-',slug).strip('-')
+                  filename=f'{wid:06d}_{safe_slug}.mp4' if wid else safe_slug+'.mp4'
+                  dest=f'{OUT}/videos/{filename}'
+                  download_binary(source,page_url,dest)
+                  actual=probe(dest)
+                  rec={'id':wid,'title':title,'slug':slug,'page_url':page_url,'source_kind':source_kind,'source_url':source,'filename':filename,'page_width':int(meta_w.group(1)) if meta_w else 0,'page_height':int(meta_h.group(1)) if meta_h else 0,**actual}
+                  return True,rec
+              except Exception as e:
+                  return False,{'id':wid,'slug':slug,'page_url':page_url,'error':repr(e)}
+
+          records=[]; failures=[]
+          # Four concurrent downloads keeps load modest while finishing quickly.
+          with ThreadPoolExecutor(max_workers=4) as ex:
+              future_map={ex.submit(process,u):u for u in pages}
+              done=0
+              for fut in as_completed(future_map):
+                  ok,data=fut.result(); done+=1
+                  if ok:
+                      records.append(data)
+                      print(f'OK {done}/{len(pages)} id={data["id"]} {data["width"]}x{data["height"]} {data["size"]}B {data["filename"]}',flush=True)
+                  else:
+                      failures.append(data)
+                      print(f'FAIL {done}/{len(pages)} {data["page_url"]} {data["error"]}',flush=True)
+
+          # De-duplicate by numeric wallpaper id, preferring larger pixel count then file size.
+          by_id={}
+          for r in records:
+              key=r['id'] or r['slug']
+              prev=by_id.get(key)
+              score=(r.get('width',0)*r.get('height',0),r.get('size',0))
+              pscore=(prev.get('width',0)*prev.get('height',0),prev.get('size',0)) if prev else (-1,-1)
+              if prev is None or score>pscore:
+                  if prev and prev['filename']!=r['filename']:
+                      try: os.remove(f'{OUT}/videos/{prev["filename"]}')
+                      except: pass
+                  by_id[key]=r
+              elif prev and prev['filename']!=r['filename']:
+                  try: os.remove(f'{OUT}/videos/{r["filename"]}')
+                  except: pass
+          records=sorted(by_id.values(),key=lambda r:(r['id'] if isinstance(r['id'],int) else 0))
+
+          with open(f'{OUT}/manifest.json','w',encoding='utf-8') as f: json.dump(records,f,ensure_ascii=False,indent=2)
+          with open(f'{OUT}/failures.json','w',encoding='utf-8') as f: json.dump(failures,f,ensure_ascii=False,indent=2)
+          with open(f'{OUT}/manifest.csv','w',encoding='utf-8-sig',newline='') as f:
+              cols=['id','title','filename','width','height','duration','bitrate','size','source_kind','page_url']
+              w=csv.DictWriter(f,fieldnames=cols); w.writeheader()
+              for r in records: w.writerow({k:r.get(k,'') for k in cols})
+          with open(f'{OUT}/README.txt','w',encoding='utf-8') as f:
+              f.write('Wallpics - SpongeBob Live Wallpapers - highest available original sources\n')
+              f.write(f'Category pages crawled: {pageno}\nDetail pages discovered: {len(pages)}\nVideos downloaded: {len(records)}\nFailures: {len(failures)}\n\n')
+              f.write('Selection rule: video_original first; falls back only to primary video. lq_video and thumbnail_video are never used.\n\n')
+              for r in records:
+                  f.write(f"{r['filename']} | {r.get('width',0)}x{r.get('height',0)} | {r.get('duration',0):.3f}s | {r.get('size',0)} bytes | {r['title']}\n")
+          print(f'FINAL videos={len(records)} failures={len(failures)}',flush=True)
+          PY
+          python3 download_all.py
+          echo '--- README ---'
+          cat output/README.txt
+          echo '--- total video bytes ---'
+          du -sh output/videos
+          cd output
+          zip -0 -q -r Wallpics_SpongeBob_Live_Highest_Quality.zip videos manifest.json manifest.csv failures.json README.txt meta
+          ls -lh Wallpics_SpongeBob_Live_Highest_Quality.zip
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallpics-spongebob-live-highest-quality
+          path: output/Wallpics_SpongeBob_Live_Highest_Quality.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
